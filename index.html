@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OSM Rectangles from URL or Click</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- Leaflet (no API key needed) -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; }
+    .legend {
+      position: absolute;
+      top: 10px; left: 10px;
+      background: rgba(255,255,255,.9);
+      padding: 8px 10px;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.15);
+      font: 14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .legend div { margin: 4px 0; display: flex; gap: 6px; align-items: center; }
+    .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.2); }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="legend">
+    <strong>Precision cells</strong>
+    <div><span class="swatch" style="background:#4ade80"></span>2 decimals</div>
+    <div><span class="swatch" style="background:#60a5fa"></span>3 decimals</div>
+    <div><span class="swatch" style="background:#f59e0b"></span>4 decimals</div>
+  </div>
+
+  <script>
+    // --- Helpers -------------------------------------------------------------
+
+    // Round down to given decimals (floor in decimal degrees)
+    function floorTo(value, decimals) {
+      const m = Math.pow(10, decimals);
+      // Math.floor works correctly for negatives here (towards -∞)
+      return Math.floor(value * m) / m;
+    }
+
+    // Build [southWest, northEast] bounds for a lat/lng cell at given precision
+    function boundsForPrecision(lat, lng, decimals) {
+      const step = 1 / Math.pow(10, decimals);
+      const south = floorTo(lat, decimals);
+      const west  = floorTo(lng, decimals);
+      const north = south + step;
+      const east  = west  + step;
+      return [[south, west], [north, east]];
+    }
+
+    // Format coordinate with fixed decimals but trim trailing zeros
+    function fmtCoord(value, decimals) {
+      return parseFloat(value.toFixed(decimals)).toString();
+    }
+
+    // Update URL query params without reloading (keeps any other params)
+    function setQueryLatLng(lat, lng) {
+      const url = new URL(window.location.href);
+      // 5 decimals keeps clicks readable and stable
+      url.searchParams.set('lat', lat.toFixed(5));
+      url.searchParams.set('lng', lng.toFixed(5));
+      history.replaceState({}, '', url);
+    }
+
+    // Extract lat/lng from URL if present and valid
+    function getLatLngFromURL() {
+      const url = new URL(window.location.href);
+      const lat = parseFloat(url.searchParams.get('lat'));
+      const lng = parseFloat(url.searchParams.get('lng'));
+      if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        return { lat, lng };
+      }
+      return null;
+    }
+
+    // --- Map setup -----------------------------------------------------------
+
+    const map = L.map('map', { zoomControl: true });
+
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // Layer group for the current marker + rectangles (we replace them on each click)
+    const drawLayer = L.layerGroup().addTo(map);
+
+    // Colors for 2/3/4 decimal precision rectangles
+    const styles = {
+      2: { color: '#16a34a', weight: 2, fillOpacity: 0.15 }, // green
+      3: { color: '#2563eb', weight: 2, fillOpacity: 0.12 }, // blue
+      4: { color: '#d97706', weight: 2, fillOpacity: 0.10 }  // amber
+    };
+
+    function drawFromPoint(lat, lng, zoomTo = false) {
+      drawLayer.clearLayers();
+
+      // Marker
+      const marker = L.marker([lat, lng]).addTo(drawLayer);
+      marker.bindPopup(
+        `<b>Clicked point</b><br/>lat: ${lat.toFixed(5)}<br/>lng: ${lng.toFixed(5)}`
+      );
+
+      // Rectangles at precisions 2, 3, 4 decimals
+      const precisions = [1, 2, 3];
+      const rects = [];
+
+      precisions.forEach((p) => {
+        const b = boundsForPrecision(lat, lng, p);
+        const rect = L.rectangle(b, styles[p]).addTo(drawLayer);
+
+        const [[s, w],[n, e]] = b;
+        rect.bindTooltip(
+          `${p} decimals<br>` +
+          `${fmtCoord(s, p)}, ${fmtCoord(w, p)} – ${fmtCoord(n, p)}, ${fmtCoord(e, p)}`
+        , { sticky: true });
+
+        rects.push(rect);
+      });
+
+      if (zoomTo) {
+        // Fit to the most precise rectangle (p=4) for a pleasant view
+        map.fitBounds(rects[rects.length - 1].getBounds(), { padding: [20, 20] });
+      }
+    }
+
+    // --- Initialize from URL or default view --------------------------------
+
+    const initial = getLatLngFromURL();
+    if (initial) {
+      drawFromPoint(initial.lat, initial.lng, true);
+    } else {
+      map.setView([20, 0], 2); // a world view; user can click anywhere
+    }
+
+    // --- Click handler: draw & update URL -----------------------------------
+
+    map.on('click', (e) => {
+      const { lat, lng } = e.latlng;
+      drawFromPoint(lat, lng, false);
+      setQueryLatLng(lat, lng);
+    });
+
+    // If user pans/zooms without a click, we keep URL as-is (only clicks update it).
+  </script>
+</body>
+</html>
